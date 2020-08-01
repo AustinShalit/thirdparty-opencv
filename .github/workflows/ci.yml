@@ -1,0 +1,118 @@
+name: CI
+
+on: [push, pull_request]
+
+jobs:
+  build-docker:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - container: wpilib/roborio-cross-ubuntu:2020-18.04
+            artifact-name: Athena
+            build-options: "-Pplatform=linux-athena -PjenkinsBuild"
+          - container: wpilib/raspbian-cross-ubuntu:10-18.04
+            artifact-name: Raspbian
+            build-options: "-Pplatform=linux-raspbian -PjenkinsBuild"
+          - container: wpilib/aarch64-cross-ubuntu:bionic-18.04
+            artifact-name: Aarch64
+            build-options: "-Pplatform=linux-aarch64bionic -PjenkinsBuild"
+          - container: wpilib/ubuntu-base:18.04
+            artifact-name: Linux
+            build-options: ""
+    name: "Build - ${{ matrix.artifact-name }}"
+    runs-on: ubuntu-latest
+    container: ${{ matrix.container }}
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y ant
+      - name: Build with Gradle
+        run: ./gradlew build --max-workers 1 ${{ matrix.build-options }}
+      - uses: actions/upload-artifact@v2
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: gradleDir/outputs
+
+  build-windows:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            artifact-name: Win64
+            architecture: x64
+          - os: windows-latest
+            artifact-name: Win32
+            architecture: x86
+    name: "Build - ${{ matrix.artifact-name }}"
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+      - uses: actions/setup-java@v1
+        with:
+          java-version: 11
+          architecture: ${{ matrix.architecture }}
+      - name: Build with Gradle
+        run: |
+          @call "C:\\Program Files (x86)\\Microsoft Visual Studio\\2019\\Enterprise\\VC\\Auxiliary\\Build\\vcvarsall.bat" ${{ matrix.architecture }}
+          set PATH=%PATH%;%ANT_HOME%\bin
+          gradlew build -PjenkinsBuild -PskipRelease -PskipSources
+      - uses: actions/upload-artifact@v2
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: gradleDir/outputs
+
+  build-macos:
+    name: "Build - macOS"
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          submodules: true
+      - uses: actions/setup-java@v1
+        with:
+          java-version: 11
+      - name: Install dependencies
+        run: brew install ant binutils
+      - name: Build with Gradle
+        run: ./gradlew build -PjenkinsBuild
+      - uses: actions/upload-artifact@v2
+        with:
+          name: ${{ matrix.artifact-name }}
+          path: gradleDir/outputs
+
+  combine:
+    name: Combine
+    needs: [build-docker, build-windows, build-macos]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v2
+        with:
+          repository: wpilibsuite/build-tools
+      - uses: actions/download-artifact@v2
+        with:
+          path: combiner/products/build/allOutputs
+      - name: Flatten Artifacts
+        run: rsync -a --delete combiner/products/build/allOutputs/*/* combiner/products/build/allOutputs/
+      - uses: actions/setup-java@v1
+        with:
+          java-version: 11
+      - name: Publish
+        run: cd combiner && ./gradlew publish -Pthirdparty
+        env:
+          ARTIFACTORY_PUBLISH_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PUBLISH_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+      - name: Publish Release
+        run: cd combiner && ./gradlew publish -Pthirdparty -PreleaseRepoPublish
+        env:
+          ARTIFACTORY_PUBLISH_USERNAME: ${{ secrets.ARTIFACTORY_USERNAME }}
+          ARTIFACTORY_PUBLISH_PASSWORD: ${{ secrets.ARTIFACTORY_PASSWORD }}
+      - uses: actions/upload-artifact@v2
+        with:
+          name: Maven
+          path: ~/releases
